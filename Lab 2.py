@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 import math
 import sys
+from pathlib import Path
 from scipy.ndimage import zoom, map_coordinates
 from scipy.signal import fftconvolve
 
@@ -15,7 +16,6 @@ class DoseMap:
         self, SSD, beam_width0, patient_width, kernal_pixel_width, mu, resolution
     ):
         self.DPB_kernals = {
-            # 1.25: np.ones((161, 161)),
             1.25: np.rot90(self._read_txt_arr("kernel_2D_1250keV"), -1),
             10: np.rot90(self._read_txt_arr("kernel_2D_10MeV"), -1),
             20: np.rot90(self._read_txt_arr("kernel_2D_20MeV"), -1),
@@ -91,9 +91,10 @@ class DoseMap:
 
             # Apply width divergence of beam:
             # Calculate range of x values for which there is a beam width
+            SPD = dSSD_cm + self.SSD
             beam_width_cm = (
-                (dSSD_cm + self.SSD) * (self.beam_width0) / self.SSD
-            )  # similar triangles, 100/6 = SPD/width
+                (SPD) * (self.beam_width0) / self.SSD
+            )  # similar triangles, 100/6 = SPD/width, or width = SPD *  (width0/SSD)
             beam_width_idx = beam_width_cm * (self.N) / self.patient_width
             min_x_idx = self.x0_idx - round(beam_width_idx / 2)
             max_x_idx = self.x0_idx + round(beam_width_idx / 2)
@@ -122,7 +123,7 @@ class DoseMap:
 
     def apply_DPB_kernel(self, energy) -> None:
 
-        scatter_map = self._create_scatter_map(resolution, energy)
+        scatter_map = self._create_polar_DPB(resolution, energy)
 
         min_y_idx = int(
             self.surface_arr.min()
@@ -133,24 +134,24 @@ class DoseMap:
 
         dose_DPB_map = np.zeros((self.N, self.N))
         cnt = 0
-        tolerance = 20
+        tolerance = 50
 
         dtheta = resolution["dtheta"]
         dr = resolution["dr"]
         rmax = resolution["rmax"]
 
         last_percent = 0
-        # for y_idx in range(self.N):
-        #     for x_idx in range(
-        #         self.N
-        #     ):  # Calculate dose close to non zero values, + a tolerance of 20 pixels
-        for y_idx in range(min_y_idx - tolerance, self.N):
+        for y_idx in range(self.N):
             for x_idx in range(
-                min_x_idx - tolerance, max_x_idx + tolerance
+                self.N
             ):  # Calculate dose close to non zero values, + a tolerance of 20 pixels
+                # for y_idx in range(min_y_idx - tolerance, self.N):
+                #     for x_idx in range(
+                #         min_x_idx - tolerance, max_x_idx + tolerance
+                #     ):  # Calculate dose close to non zero values, + a tolerance of 20 pixels
                 ##### Percent Bar #####
                 cnt += 1
-                percent = round(cnt / (114380) * 100, 2)
+                percent = round(cnt / (149960) * 100, 2)
                 if percent != last_percent:
                     sys.stdout.write(f"\rEnergy: {energy} MeV | Progress: {percent}%")
                     last_percent = percent
@@ -161,14 +162,17 @@ class DoseMap:
                         x_prime_idx, y_prime_idx = self._x_y_prime_idx(
                             r, theta, x_idx, y_idx
                         )
-                        # Main equation. Note it omitts mass-attenuation, therefore is relative dose. D(x,y) ~ integral { Fluence(x', y') * DPB(x', y') * exp{- mu * t} }. Note self.dose_maps includes both fluence and attenuation.
+                        # Main equation. Note it omitts mass-attenuation, therefore is relative dose. D(x,y) ~ integral { Fluence(x', y') * DPB(x', y') * exp{- mu * t} } dA. Note self.dose_maps includes both fluence and attenuation at this point in calculatino
                         if 0 <= x_prime_idx <= (self.N - 1) and 0 <= y_prime_idx <= (
                             self.N - 1
                         ):  # Check if in bounds
                             dose_DPB_map[y_idx, x_idx] += (
-                                scatter_map[(r, theta)] * self.dose_maps[energy][y_prime_idx, x_prime_idx] * r * dr * dtheta
+                                scatter_map[(r, theta)]
+                                * self.dose_maps[energy][y_prime_idx, x_prime_idx]
+                                * r
+                                * dr
+                                * dtheta
                             )
-        # print(cnt)
         self.dose_maps[energy] = dose_DPB_map
 
     def apply_DPB_conv(self, energy) -> None:
@@ -206,9 +210,17 @@ class DoseMap:
         plt.show()
 
     def plot_dose_map(
-        self, energy, title="2D Dose Map", cbar_label="Relative Beam Intensity"
+        self,
+        energy,
+        title="2D Dose Map",
+        cbar_label="Relative Dose Delivered",
+        normalize=True,
     ) -> None:
         arr = self.dose_maps[energy]
+
+        if normalize:  # Normalize to 1 at SSD = 100 cm
+            ref_dose = self.dose_maps[energy][self.y0_idx, self.x0_idx]
+            arr = arr / ref_dose
 
         im = plt.imshow(arr, cmap="jet", origin="upper", extent=self.extent)
         cbar = plt.colorbar(im)
@@ -266,16 +278,9 @@ class DoseMap:
         plt.show()
         pass
 
-    def _DPB_lookup(self, r, theta, energy) -> float:
-        if energy not in self.DPB_polar:
-            self.DPB_polar[energy] = self._create_DPB_polar(
-                resolution=self.resolution, energy=energy
-            )
-        return self.DPB_polar[energy][(r, theta)]
-
-    def _create_scatter_map(self, resolution, energy) -> dict:
+    def _create_polar_DPB(self, resolution, energy) -> dict:
         """
-        Pre-multiply the scatter from the
+        Re-create DPB kernel in polar coordinates, only considering the resolution used.
         """
         dtheta = resolution["dtheta"]
         dr = resolution["dr"]
@@ -301,53 +306,7 @@ class DoseMap:
                 y_idx = (self.M - 1) / 2 - y_pixels
                 x_idx = (self.M - 1) / 2 + x_pixels
 
-                DPB = map_coordinates(
-                    self.DPB_kernals[energy],
-                    [[y_idx], [x_idx]],
-                    order=1,
-                    mode="nearest",
-                )[0]
-
-                # For Dose map at point P':
-
-                y_pixels_dose = (
-                    r * math.sin(theta * math.pi / 180) * self.N / self.patient_width
-                )
-                x_pixels_dose = (
-                    r * math.cos(theta * math.pi / 180) * self.N / self.patient_width
-                )
-
-                y_idx_dose = (self.N - 1) / 2 - y_pixels_dose
-                x_idx_dose = (self.N - 1) / 2 + x_pixels_dose
-
-                # if 0 <= y_idx_dose < self.N and 0 <= x_idx_dose < self.N:
-                dose = map_coordinates(
-                    self.dose_maps[energy],
-                    [[y_idx_dose], [x_idx_dose]],
-                    order=1,
-                    mode="nearest",
-                )[0]
-                # else:
-                #     dose = 0
-                map[(r, theta)] = DPB
-        return map
-
-    def _create_DPB_polar(self, resolution, energy) -> dict:
-        # Create a map (hash map or Set, dict in python) where each key is a theta r coordinate, and the value is the DPB value at that theta and r. Each DPB value is interpolated.
-        dtheta = resolution["dtheta"]
-        dr = resolution["dr"]
-        rmax = resolution["rmax"]
-
-        map = {}  # (r, theta): tuple(float, float) -> DPB value: float
-        for r in np.arange(0, rmax, dr):
-            for theta in range(0, 360, dtheta):
-
-                y_pixels = r * math.sin(theta * math.pi / 180) / self.kernal_pixel_width
-                x_pixels = r * math.cos(theta * math.pi / 180) / self.kernal_pixel_width
-
-                y_idx = (self.M + 1) / 2 - y_pixels
-                x_idx = (self.M + 1) / 2 + x_pixels
-
+                # Interpolate DPB kernel. Note this is done in indicies, but is the same as if the array was in cm x cm and interpolated a specific cm.
                 DPB = map_coordinates(
                     self.DPB_kernals[energy],
                     [[y_idx], [x_idx]],
@@ -361,13 +320,18 @@ class DoseMap:
     def plot_DPB_polar_cartesian(
         self, energy, resolution=None, dpb_polar=None, log10=False
     ) -> None:
+        """
+        Made with ChatGPT ;-;
+        Just for visualization
+        """
         if resolution is None:
             resolution = self.resolution
         if dpb_polar is None:
-            dpb_polar = self._create_scatter_map(resolution, energy)
+            dpb_polar = self._create_polar_DPB(resolution, energy)
 
         dr = resolution["dr"]
         rmax = resolution["rmax"]
+        dtheta = resolution["dtheta"]
 
         n = int(np.ceil(2 * rmax / dr)) + 1
         img = np.full((n, n), np.nan)
@@ -391,7 +355,9 @@ class DoseMap:
         plt.imshow(z_plot, origin="lower", extent=extent, cmap="jet")
         plt.xlabel("x (cm)")
         plt.ylabel("y (cm)")
-        plt.title(f"DPB Polar Map ({energy} MeV)")
+        plt.title(
+            f"DPB Resolution | dr = {dr} cm, dtheta = {dtheta} Deg. | {energy} MeV"
+        )
         label = "log10(DPB)" if log10 else "DPB"
         plt.colorbar(label=label)
         plt.axis("equal")
@@ -450,6 +416,17 @@ class DoseMap:
     def _read_txt_arr(self, file_name: str) -> np.ndarray:
         arr = np.loadtxt(f"{file_name}.txt", delimiter=" ")
         return arr
+
+    def _save(self, arr: np.ndarray, name: str) -> Path:
+        save_dir = Path("Saved Data")
+        save_dir.mkdir(parents=True, exist_ok=True)
+        path = save_dir / f"{name}.npy"
+        np.save(path, arr)
+        return path
+
+    def _load(self, name: str) -> np.ndarray:
+        path = Path("Saved Data") / f"{name}.npy"
+        return np.load(path)
 
     def _x_y_prime_idx(self, r, theta, x_idx, y_idx) -> tuple[int, int]:
         dx_cm = r * math.cos(theta * math.pi / 180)
@@ -557,7 +534,7 @@ SSD = 100  # cm
 beam_width0 = 6  # cm
 patient_width = 15  # cm
 kernal_pixel_width = 0.1  # cm
-resolution = {"dr": 0.1, "dtheta": 15, "rmax": 8}
+resolution = {"dr": 0.1, "dtheta": 10, "rmax": 8}
 
 patient = DoseMap(
     SSD=SSD,
@@ -568,12 +545,17 @@ patient = DoseMap(
     resolution=resolution,
 )
 
-energy = 1.25
-patient.create_fluence(energy)
-patient.apply_attenuation(energy, option="approx")
-patient.plot_DPB_polar_cartesian(energy, log10=True)
-patient.apply_DPB_kernel(energy)
-patient.plot_dose_map(energy, title=f"{energy} MeV | 2D Dose with Applied DPB Kernel")
+energy = 10
+
+# –––––––––––––––––––––––––––––-- Visualization –––––––––––––––––––––––––––––--
+# patient._test_plot_patient_surface(unit="idx")
+# patient._test_plot_patient_surface()
+# patient.create_fluence(energy)
+# patient._test_plot_fluence_no_mask()
+# patient.apply_attenuation(energy, option="approx")
+# patient.plot_DPB_polar_cartesian(energy, log10=True)
+# patient.apply_DPB_kernel(energy)
+# patient.plot_dose_map(energy, title=f"{energy} MeV | 2D Dose with Applied DPB Kernel")
 
 
 # ––––––– Deliverable 1: Display each kernel with appropriate scale/cmap –––––––
@@ -582,13 +564,9 @@ patient.plot_dose_map(energy, title=f"{energy} MeV | 2D Dose with Applied DPB Ke
 # patient.plot_DPB_kernal(20)
 
 # ––––––– Deliverable 2: Display primary fluence wo phantom (i.e. ISL + beam width) –––––––
-# patient._test_plot_patient_surface(unit="idx")
-# patient._test_plot_patient_surface()
-
-# patient.create_fluence(energy=1.25)
-# patient._test_plot_fluence_no_mask()
-# patient.create_fluence(energy=10)
-
+patient.create_fluence(energy=1.25)
+patient.create_fluence(energy=10)
+patient.create_fluence(energy=20)
 # patient.plot_dose_map(
 #     energy=1.25,
 #     title="Primary Fluence in Absence of Phantom",
@@ -596,32 +574,40 @@ patient.plot_dose_map(energy, title=f"{energy} MeV | 2D Dose with Applied DPB Ke
 # )
 
 # ––––––– Deliverable 3: Display attenuation in tissue along ray-lines –––––––
-# patient._test_plot_patient_surface(unit="idx")
-# print(patient._t((265, 255)))
-# print(patient._t((245, 255)))
-
-# patient.apply_attenuation(energy=1.25, option="approx")
-# patient.apply_attenuation(energy=10, option="approx")
-# patient.apply_attenuation(energy=1.25, option="approx")
-# patient.plot_dose_map(energy=1.25, title="Dose Map | Attenuation Along Tissue")
-# patient.plot_dose_map(energy=10, title="Dose Map | Attenuation Along Tissue")
-# patient.plot_dose_map(energy=1.25, title="Dose Map | Attenuation Along Tissue")
-# patient._test_plot_patient_surface()
+patient.apply_attenuation(energy=1.25, option="ray trace")
+patient.apply_attenuation(energy=10, option="ray trace")
+patient.apply_attenuation(energy=20, option="ray trace")
+# # patient.plot_dose_map(
+#     energy=1.25, title=f"{1.25} MeV 2D Dose Map | Attenuation in Tissue"
+# )
+# patient.plot_dose_map(energy=10, title=f"{10} MeV 2D Dose Map | Attenuation in Tissue")
+# patient.plot_dose_map(energy=20, title=f"{20} MeV 2D Dose Map | Attenuation in Tissue")
 # ––––––– Deliverable 4: Dose distribution –––––––
 # patient.apply_DPB_conv(1.25)
 # patient.apply_DPB_conv(10)
 # patient.apply_DPB_conv(20)
-# patient.plot_dose_map(1.25, title="2D Dose Plot via Convolution for Troubleshooting")
-# patient.plot_dose_map(10, title="2D Dose Plot via Convolution for Troubleshooting")
-# patient.plot_dose_map(20, title="2D Dose Plot via Convolution for Troubleshooting")
-# patient.apply_DPB_kernel(energy=1.25)
-# patient.plot_dose_map(10, title=f"{10} MeV | 2D Dose with Applied DPB Kernel")
-# patient.plot_dose_map(20, title=f"{20} MeV | 2D Dose with Applied DPB Kernel")
-# patient.plot_dose_map(1.25, title=f"{1.25} MeV | 2D Dose with Applied DPB Kernel")
+# patient.plot_dose_map(1.25, title=f"{1.25} MeV 2D Dose Plot via Convolution for Troubleshooting")
+# patient.plot_dose_map(10, title=f"{10} MeV 2D Dose Plot via Convolution for Troubleshooting")
+# patient.plot_dose_map(20, title=f"{20} MeV 2D Dose Plot via Convolution for Troubleshooting")
+
+
+# patient.dose_maps[1.25] = patient._load("1_25_MeV_Dose_Map_FFT")
+
+
+patient.apply_DPB_kernel(energy=1.25)
+patient.apply_DPB_kernel(energy=10)
+patient.apply_DPB_kernel(energy=20)
+patient._save(patient.dose_maps[1.25], "1_25_MeV_Dose_Map")
+patient._save(patient.dose_maps[10], "10_MeV_Dose_Map")
+patient._save(patient.dose_maps[20], "20_MeV_Dose_Map")
+patient.plot_dose_map(1.25, title=f"{1.25} MeV | 2D Dose with Applied DPB Kernel")
+patient.plot_dose_map(10, title=f"{10} MeV | 2D Dose with Applied DPB Kernel")
+patient.plot_dose_map(20, title=f"{20} MeV | 2D Dose with Applied DPB Kernel")
+
 
 # ––––––– Deliverable 5: PDD curves –––––––
-# patient.plot_PDD()
+patient.plot_PDD()
 
 
 # ––––––– Deliverable 6:  curves –––––––
-# patient.plot_lat_dose_profiles()
+patient.plot_lat_dose_profiles()
