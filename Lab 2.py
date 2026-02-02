@@ -45,7 +45,7 @@ class DoseMap:
         self.DPB_Dose = {}
         # Initialize DPB_polor maps
 
-        # Find SSD point on centeral dose map coordinate system:
+        # Find SSD point on central dose map coordinate system:
         self.x0_idx = self.y0_idx = int(
             (self.N - 1) / 2
         )  # x (or y) idx of central axis
@@ -57,7 +57,7 @@ class DoseMap:
             self.patient_width / self.N
         )
 
-        # Centeral coordinate system for plotting (origin at SSD of centeral axis)
+        # central coordinate system for plotting (origin at SSD of central axis)
         self.x0_idx = int(self.N / 2 - 1)
         self.y0_idx = int(self.surface_arr[self.x0_idx])
 
@@ -86,12 +86,14 @@ class DoseMap:
             # Apply ISL:
             y_cm = self._y_cm(y_idx)
             dSSD_cm = self.ySSD_cm - y_cm
-            beam = (self.SSD / (self.SSD + dSSD_cm)) ** 2
+            SPD = dSSD_cm + self.SSD
+
+            beam = (self.SSD / (SPD)) ** 2  # Apply ISL to values
+
             fluence_map[y_idx, :] = beam
 
             # Apply width divergence of beam:
             # Calculate range of x values for which there is a beam width
-            SPD = dSSD_cm + self.SSD
             beam_width_cm = (
                 (SPD) * (self.beam_width0) / self.SSD
             )  # similar triangles, 100/6 = SPD/width, or width = SPD *  (width0/SSD)
@@ -253,22 +255,39 @@ class DoseMap:
         plt.grid()
         plt.show()
 
-    def plot_lat_dose_profiles(self) -> None:
+    def plot_lat_dose_profiles(self, normalization="individual") -> None:
+        """
+        Docstring for plot_lat_dose_profiles
+
+        :param normalization: "individual" | "total" | "central axis"
+        """
         depth_4cm = int(self.y0_idx + 4 * (self.N / self.patient_width))
         x_min = -patient_width / 2
         x_max = patient_width / 2
         x = np.linspace(x_min, x_max, self.N)
         dose_profile_list = []
-        max_dose = 0
-        for energy, map in self.dose_maps.items():
-            dose_profile = map[depth_4cm, :]
-            dose_profile_list.append(dose_profile)
-            max_dose = max(max_dose, dose_profile.max())
-            dose_profile = dose_profile  # Normalize
 
-        for energy, map in self.dose_maps.items():
-            dose_profile = map[depth_4cm, :]
-            plt.plot(x, dose_profile / max_dose, label=f"{energy} MeV")
+        match normalization:
+            case "total":
+                max_dose = 0
+                for energy, map in self.dose_maps.items():
+                    dose_profile = map[depth_4cm, :]
+                    dose_profile_list.append(dose_profile)
+                    max_dose = max(max_dose, dose_profile.max())
+                    dose_profile = dose_profile  # Normalize
+                for energy, map in self.dose_maps.items():
+                    dose_profile = map[depth_4cm, :]
+                    plt.plot(x, dose_profile / max_dose, label=f"{energy} MeV")
+
+            case "individual":
+                for energy, map in self.dose_maps.items():
+                    dose_profile = map[depth_4cm, :]
+                    plt.plot(x, dose_profile / dose_profile.max(), label=f"{energy} MeV")
+            
+            case "central axis":
+                for energy, map in self.dose_maps.items():
+                    dose_profile = map[depth_4cm, :]
+                    plt.plot(x, dose_profile / dose_profile[self.x0_idx], label=f"{energy} MeV")
 
         plt.xlabel("Lateral Distance (cm)")
         plt.ylabel("Percent Dose")
@@ -564,9 +583,9 @@ energy = 10
 # patient.plot_DPB_kernal(20)
 
 # ––––––– Deliverable 2: Display primary fluence wo phantom (i.e. ISL + beam width) –––––––
-patient.create_fluence(energy=1.25)
-patient.create_fluence(energy=10)
-patient.create_fluence(energy=20)
+# patient.create_fluence(energy=1.25)
+# patient.create_fluence(energy=10)
+# patient.create_fluence(energy=20)
 # patient.plot_dose_map(
 #     energy=1.25,
 #     title="Primary Fluence in Absence of Phantom",
@@ -574,9 +593,9 @@ patient.create_fluence(energy=20)
 # )
 
 # ––––––– Deliverable 3: Display attenuation in tissue along ray-lines –––––––
-patient.apply_attenuation(energy=1.25, option="ray trace")
-patient.apply_attenuation(energy=10, option="ray trace")
-patient.apply_attenuation(energy=20, option="ray trace")
+# patient.apply_attenuation(energy=1.25, option="ray trace")
+# patient.apply_attenuation(energy=10, option="ray trace")
+# patient.apply_attenuation(energy=20, option="ray trace")
 # # patient.plot_dose_map(
 #     energy=1.25, title=f"{1.25} MeV 2D Dose Map | Attenuation in Tissue"
 # )
@@ -591,15 +610,18 @@ patient.apply_attenuation(energy=20, option="ray trace")
 # patient.plot_dose_map(20, title=f"{20} MeV 2D Dose Plot via Convolution for Troubleshooting")
 
 
-# patient.dose_maps[1.25] = patient._load("1_25_MeV_Dose_Map_FFT")
+# patient.apply_DPB_kernel(energy=1.25)
+# patient.apply_DPB_kernel(energy=10)
+# patient.apply_DPB_kernel(energy=20)
+# patient._save(patient.dose_maps[1.25], "1_25_MeV_Dose_Map")
+# patient._save(patient.dose_maps[10], "10_MeV_Dose_Map")
+# patient._save(patient.dose_maps[20], "20_MeV_Dose_Map")
 
 
-patient.apply_DPB_kernel(energy=1.25)
-patient.apply_DPB_kernel(energy=10)
-patient.apply_DPB_kernel(energy=20)
-patient._save(patient.dose_maps[1.25], "1_25_MeV_Dose_Map")
-patient._save(patient.dose_maps[10], "10_MeV_Dose_Map")
-patient._save(patient.dose_maps[20], "20_MeV_Dose_Map")
+patient.dose_maps[1.25] = patient._load("1_25_MeV_Dose_Map")
+patient.dose_maps[10] = patient._load("10_MeV_Dose_Map")
+patient.dose_maps[20] = patient._load("20_MeV_Dose_Map")
+
 patient.plot_dose_map(1.25, title=f"{1.25} MeV | 2D Dose with Applied DPB Kernel")
 patient.plot_dose_map(10, title=f"{10} MeV | 2D Dose with Applied DPB Kernel")
 patient.plot_dose_map(20, title=f"{20} MeV | 2D Dose with Applied DPB Kernel")
@@ -610,4 +632,4 @@ patient.plot_PDD()
 
 
 # ––––––– Deliverable 6:  curves –––––––
-patient.plot_lat_dose_profiles()
+patient.plot_lat_dose_profiles(normalization="central axis")
