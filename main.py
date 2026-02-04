@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from scipy.ndimage import zoom, map_coordinates
 from scipy.signal import fftconvolve
+from typing import Literal, TypeAlias
 
 # –––––––––––––––––– Defining Class ––––––––––––––––––
 
@@ -69,7 +70,7 @@ class DoseMap:
         y_min = -edge_cm - self.ySSD_cm
         self.extent = [x_min, x_max, y_min, y_max]
 
-    def create_fluence(self, energy) -> None:
+    def create_fluence(self, energy: float) -> None:
         """
         Uniform beam profile, and (assumed) monoenergetic energy. Value decreases with distance due to ISL. Width increases due to divergence as described by similar triangles, for 6cm width at SSD = 100.
 
@@ -112,7 +113,9 @@ class DoseMap:
         # Apply Patient Mask:
         self.dose_maps[energy] = fluence_map * self.patient_mask
 
-    def apply_attenuation(self, energy, option="ray trace") -> None:
+    def apply_attenuation(
+        self, energy: float, option: Literal["ray trace", "uniform"] = "ray trace"
+    ) -> None:
         attenuation_map = self.patient_mask.copy()
         for y_idx in range(attenuation_map.shape[0]):
             for x_idx in range(attenuation_map.shape[1]):
@@ -123,7 +126,7 @@ class DoseMap:
                     attenuation_map[y_idx, x_idx] = 0
         self.dose_maps[energy] *= attenuation_map
 
-    def apply_DPB_kernel(self, energy) -> None:
+    def apply_DPB_kernel(self, energy, within_patient=True) -> None:
 
         scatter_map = self._create_polar_DPB(resolution, energy)
 
@@ -152,6 +155,8 @@ class DoseMap:
                 #         min_x_idx - tolerance, max_x_idx + tolerance
                 #     ):  # Calculate dose close to non zero values, + a tolerance of 20 pixels
                 ##### Percent Bar #####
+                if within_patient and not self.patient_mask[y_idx, x_idx]:
+                    continue
                 cnt += 1
                 percent = round(cnt / (149960) * 100, 2)
                 if percent != last_percent:
@@ -177,7 +182,7 @@ class DoseMap:
                             )
         self.dose_maps[energy] = dose_DPB_map
 
-    def apply_DPB_conv(self, energy) -> None:
+    def apply_DPB_conv(self, energy: float) -> None:
         image = self.dose_maps[energy]
         kernel = self.DPB_kernals[energy]
         dx_img = 15 / 512
@@ -188,7 +193,7 @@ class DoseMap:
 
         self.dose_maps[energy] = fftconvolve(image, kernel_resampled, mode="same")
 
-    def plot_DPB_kernal(self, energy) -> None:
+    def plot_DPB_kernal(self, energy: float) -> None:
         kernal = self.DPB_kernals[energy]
         # Rotate kernal so beam enters from top to bottom:
         # kernal = np.rot90(kernal_0, -1)
@@ -213,16 +218,20 @@ class DoseMap:
 
     def plot_dose_map(
         self,
-        energy,
-        title="2D Dose Map",
+        energy: float,
+        title: str = "2D Dose Map",
         cbar_label="Relative Dose Delivered",
-        normalize=True,
+        normalize: Literal["max", "center"] | None = None,
     ) -> None:
         arr = self.dose_maps[energy]
+        match normalize:  # Normalize to 1 at SSD = 100 cm
 
-        if normalize:  # Normalize to 1 at SSD = 100 cm
-            ref_dose = self.dose_maps[energy][self.y0_idx, self.x0_idx]
-            arr = arr / ref_dose
+            case "center":  # normalize to isocenter
+                ref_dose = self.dose_maps[energy][self.y0_idx, self.x0_idx]
+                arr = arr / ref_dose
+            case "max":  # normalize to the maximum dose
+                ref_dose = self.dose_maps[energy].max()
+                arr = arr / ref_dose
 
         im = plt.imshow(arr, cmap="jet", origin="upper", extent=self.extent)
         cbar = plt.colorbar(im)
@@ -255,7 +264,10 @@ class DoseMap:
         plt.grid()
         plt.show()
 
-    def plot_lat_dose_profiles(self, normalization="individual") -> None:
+    def plot_lat_dose_profiles(
+        self,
+        normalization: Literal["total", "individual", "central axis"] = "individual",
+    ) -> None:
         """
         Docstring for plot_lat_dose_profiles
 
@@ -282,12 +294,18 @@ class DoseMap:
             case "individual":
                 for energy, map in self.dose_maps.items():
                     dose_profile = map[depth_4cm, :]
-                    plt.plot(x, dose_profile / dose_profile.max(), label=f"{energy} MeV")
-            
+                    plt.plot(
+                        x, dose_profile / dose_profile.max(), label=f"{energy} MeV"
+                    )
+
             case "central axis":
                 for energy, map in self.dose_maps.items():
                     dose_profile = map[depth_4cm, :]
-                    plt.plot(x, dose_profile / dose_profile[self.x0_idx], label=f"{energy} MeV")
+                    plt.plot(
+                        x,
+                        dose_profile / dose_profile[self.x0_idx],
+                        label=f"{energy} MeV",
+                    )
 
         plt.xlabel("Lateral Distance (cm)")
         plt.ylabel("Percent Dose")
@@ -297,7 +315,7 @@ class DoseMap:
         plt.show()
         pass
 
-    def _create_polar_DPB(self, resolution, energy) -> dict:
+    def _create_polar_DPB(self, resolution: dict, energy: float) -> dict:
         """
         Re-create DPB kernel in polar coordinates, only considering the resolution used.
         """
@@ -386,12 +404,15 @@ class DoseMap:
         """
         Returns the distance traversed by a ray at point P within the patient, in cm.
 
+        If ray trace (diverging ray lines):
         Find distance via minimizing y - mx - b = 0, where y = mx + b describes the ray line towards the point source creating the beam.
+
+        If uniform fluence, the distance travelled through the patient is simply the the vertical distance from point P to the surfarce directly above.
 
         Parameters:
             P - (x, y) in unit index wrt dose map array
-            option (str) – "approx" | "ray trace".
-                Approx simply takes the vertical path, not taking account for divergence. Used for computation time in taking into account
+            option (str) – "uniform" | "ray trace".
+                Uniform simply takes the vertical path, not taking account for divergence. Used for computation time in taking into account
 
         """
         x_idx, y_idx = P
@@ -428,7 +449,7 @@ class DoseMap:
                     t = math.sqrt((dx_cm) ** 2 + (dy_cm) ** 2)
                     return t
                 dist_prev = dist
-        elif option == "approx":
+        elif option == "uniform":
             t = self.idx_to_cm(y_idx - self.surface_arr[x_idx])
             return t
 
@@ -447,7 +468,7 @@ class DoseMap:
         path = Path("Saved Data") / f"{name}.npy"
         return np.load(path)
 
-    def _x_y_prime_idx(self, r, theta, x_idx, y_idx) -> tuple[int, int]:
+    def _x_y_prime_idx(self, r: float, theta: int, x_idx, y_idx) -> tuple[int, int]:
         dx_cm = r * math.cos(theta * math.pi / 180)
         dy_cm = r * math.sin(theta * math.pi / 180)
 
@@ -459,13 +480,13 @@ class DoseMap:
 
         return int(x_prime_idx), int(y_prime_idx)
 
-    def _y_cm(self, y_idx) -> float:
+    def _y_cm(self, y_idx: int) -> float:
         """
         Returns the y position in cm, relative to the dose map coordinate system for a given y idx
         """
         return (self.N / 2 - (y_idx + 1)) * (self.patient_width / self.N)
 
-    def _x_idx_bounds(self, energy) -> tuple[int, int]:
+    def _x_idx_bounds(self, energy: float) -> tuple[int, int]:
         arr = self.dose_maps[energy][
             self.N - 1, :
         ]  # Only examine the last row (since we know beam diverges, and will be largest width)
@@ -477,7 +498,7 @@ class DoseMap:
                 x_max = i - 1
         return x_min, x_max
 
-    def _DPB_polar(self, r, theta, energy) -> float:
+    def _DPB_polar(self, r: float, theta: int, energy: float) -> float:
 
         x_cm = r * math.cos(theta * math.pi / 180)
         y_cm = r * math.sin(theta * math.pi / 180)
@@ -500,11 +521,11 @@ class DoseMap:
         return surface_arr
         # Find 1D array describing surface y coordinate (idx) as a function of x (idx)
 
-    def idx_to_cm(self, idx) -> float:
+    def idx_to_cm(self, idx: int) -> float:
         cm = (idx + 1) * (self.patient_width / self.N)
         return cm
 
-    def cm_to_idx(self, cm) -> int:
+    def cm_to_idx(self, cm: float) -> int:
         return cm * (self.N / self.patient_width) - 1
 
     def _test_plot(
@@ -523,7 +544,7 @@ class DoseMap:
         plt.title = "Polar Resolution Visualization"
         plt.show()
 
-    def _test_plot_patient_surface(self, unit="cm") -> None:
+    def _test_plot_patient_surface(self, unit: str = "cm") -> None:
         arr = self.patient_mask
         if unit == "cm":
             im = plt.imshow(arr, cmap="binary", origin="upper", extent=self.extent)
@@ -564,43 +585,47 @@ patient = DoseMap(
     resolution=resolution,
 )
 
-energy = 10
+"""
+Note energy must be 1.25 | 10 | 20 type float. Code is not modular for other energies. 
+"""
+
 
 # –––––––––––––––––––––––––––––-- Visualization –––––––––––––––––––––––––––––--
 # patient._test_plot_patient_surface(unit="idx")
 # patient._test_plot_patient_surface()
 # patient.create_fluence(energy)
 # patient._test_plot_fluence_no_mask()
-# patient.apply_attenuation(energy, option="approx")
+# patient.apply_attenuation(energy, option="uniform")
 # patient.plot_DPB_polar_cartesian(energy, log10=True)
 # patient.apply_DPB_kernel(energy)
 # patient.plot_dose_map(energy, title=f"{energy} MeV | 2D Dose with Applied DPB Kernel")
 
 
 # ––––––– Deliverable 1: Display each kernel with appropriate scale/cmap –––––––
-# patient.plot_DPB_kernal(1.25)
-# patient.plot_DPB_kernal(10)
-# patient.plot_DPB_kernal(20)
+patient.plot_DPB_kernal(1.25)
+patient.plot_DPB_kernal(10)
+patient.plot_DPB_kernal(20)
 
 # ––––––– Deliverable 2: Display primary fluence wo phantom (i.e. ISL + beam width) –––––––
-# patient.create_fluence(energy=1.25)
-# patient.create_fluence(energy=10)
-# patient.create_fluence(energy=20)
-# patient.plot_dose_map(
-#     energy=1.25,
-#     title="Primary Fluence in Absence of Phantom",
-#     cbar_label="Relative Fluence",
-# )
+patient.create_fluence(energy=1.25)
+patient.create_fluence(energy=10)
+patient.create_fluence(energy=20)
+patient.plot_dose_map(
+    energy=1.25,
+    title="Primary Fluence in Absence of Phantom",
+    cbar_label="Relative Fluence",
+)
 
 # ––––––– Deliverable 3: Display attenuation in tissue along ray-lines –––––––
-# patient.apply_attenuation(energy=1.25, option="ray trace")
-# patient.apply_attenuation(energy=10, option="ray trace")
-# patient.apply_attenuation(energy=20, option="ray trace")
-# # patient.plot_dose_map(
-#     energy=1.25, title=f"{1.25} MeV 2D Dose Map | Attenuation in Tissue"
-# )
-# patient.plot_dose_map(energy=10, title=f"{10} MeV 2D Dose Map | Attenuation in Tissue")
-# patient.plot_dose_map(energy=20, title=f"{20} MeV 2D Dose Map | Attenuation in Tissue")
+patient.apply_attenuation(energy=1.25, option="uniform")
+patient.apply_attenuation(energy=10, option="uniform")
+patient.apply_attenuation(energy=20, option="uniform")
+patient.plot_dose_map(
+    energy=1.25, title=f"{1.25} MeV 2D Dose Map | Attenuation in Tissue"
+)
+patient.plot_dose_map(energy=10, title=f"{10} MeV 2D Dose Map | Attenuation in Tissue")
+patient.plot_dose_map(energy=20, title=f"{20} MeV 2D Dose Map | Attenuation in Tissue")
+
 # ––––––– Deliverable 4: Dose distribution –––––––
 # patient.apply_DPB_conv(1.25)
 # patient.apply_DPB_conv(10)
@@ -609,7 +634,6 @@ energy = 10
 # patient.plot_dose_map(10, title=f"{10} MeV 2D Dose Plot via Convolution for Troubleshooting")
 # patient.plot_dose_map(20, title=f"{20} MeV 2D Dose Plot via Convolution for Troubleshooting")
 
-
 # patient.apply_DPB_kernel(energy=1.25)
 # patient.apply_DPB_kernel(energy=10)
 # patient.apply_DPB_kernel(energy=20)
@@ -617,19 +641,24 @@ energy = 10
 # patient._save(patient.dose_maps[10], "10_MeV_Dose_Map")
 # patient._save(patient.dose_maps[20], "20_MeV_Dose_Map")
 
+patient.dose_maps[1.25] = patient._load("1_25_MeV_Dose_Map") * patient.patient_mask
+patient.dose_maps[10] = patient._load("10_MeV_Dose_Map") * patient.patient_mask
+patient.dose_maps[20] = patient._load("20_MeV_Dose_Map") * patient.patient_mask
 
-patient.dose_maps[1.25] = patient._load("1_25_MeV_Dose_Map")
-patient.dose_maps[10] = patient._load("10_MeV_Dose_Map")
-patient.dose_maps[20] = patient._load("20_MeV_Dose_Map")
-
-patient.plot_dose_map(1.25, title=f"{1.25} MeV | 2D Dose with Applied DPB Kernel")
-patient.plot_dose_map(10, title=f"{10} MeV | 2D Dose with Applied DPB Kernel")
-patient.plot_dose_map(20, title=f"{20} MeV | 2D Dose with Applied DPB Kernel")
-
+patient.plot_dose_map(
+    1.25, title=f"{1.25} MeV | 2D Dose with Applied DPB Kernel", normalize="max"
+)
+patient.plot_dose_map(
+    10, title=f"{10} MeV | 2D Dose with Applied DPB Kernel", normalize="max"
+)
+patient.plot_dose_map(
+    20, title=f"{20} MeV | 2D Dose with Applied DPB Kernel", normalize="max"
+)
 
 # ––––––– Deliverable 5: PDD curves –––––––
 patient.plot_PDD()
 
-
 # ––––––– Deliverable 6:  curves –––––––
 patient.plot_lat_dose_profiles(normalization="central axis")
+
+patient.plot_dose_map()
