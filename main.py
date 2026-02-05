@@ -243,22 +243,21 @@ class DoseMap:
 
     def plot_PDD(self) -> None:
         """
-        Plot PDD along central axis for the current dose map of all 3 energies
+        Plot PDD along central axis for the current dose map of all 3 energies. Plot starts at depth 0 along the central axis
         """
-        # y0_idx = int(self.surface_arr[x0_idx])
 
         # Obtain appropriate dimension y axis. Note coordinate system is plotted to be centered at SSD along central axis.
 
-        y_lower = -patient_width / 2 + self.ySSD_cm
-        y_upper = patient_width / 2 + self.ySSD_cm
-        y = np.linspace(y_lower, y_upper, self.N)
-
+        depth_upperbound = self.patient_width / 2 + self.ySSD_cm
         for energy, map in self.dose_maps.items():
-            pdd = map[:, self.x0_idx]
-            pdd = pdd / pdd.max()  # Normalize
-            plt.plot(y, pdd, label=f"{energy} MeV")
+            pdd = map[self.y0_idx :, self.x0_idx]
+            depth = (
+                np.arange(pdd.shape[0]) * depth_upperbound / pdd.shape[0]
+            )  # create a numpy array from 1 -> (however many pixels deep the patient is), then divide by those pixels (last value now = 1) and scale by the max depth of patient in cm.
+            pdd = pdd / pdd.max() * 100  # Normalize
+            plt.plot(depth, pdd, label=f"{energy} MeV")
         plt.xlabel("Depth (cm)")
-        plt.ylabel("Percent Depth Dose")
+        plt.ylabel("Percent Depth Dose (%)")
         plt.title("PDD Curve")
         plt.legend()
         plt.grid()
@@ -289,13 +288,15 @@ class DoseMap:
                     dose_profile = dose_profile  # Normalize
                 for energy, map in self.dose_maps.items():
                     dose_profile = map[depth_4cm, :]
-                    plt.plot(x, dose_profile / max_dose, label=f"{energy} MeV")
+                    plt.plot(x, dose_profile / max_dose * 100, label=f"{energy} MeV")
 
             case "individual":
                 for energy, map in self.dose_maps.items():
                     dose_profile = map[depth_4cm, :]
                     plt.plot(
-                        x, dose_profile / dose_profile.max(), label=f"{energy} MeV"
+                        x,
+                        dose_profile / dose_profile.max() * 100,
+                        label=f"{energy} MeV",
                     )
 
             case "central axis":
@@ -303,12 +304,12 @@ class DoseMap:
                     dose_profile = map[depth_4cm, :]
                     plt.plot(
                         x,
-                        dose_profile / dose_profile[self.x0_idx],
+                        dose_profile / dose_profile[self.x0_idx] * 100,
                         label=f"{energy} MeV",
                     )
 
         plt.xlabel("Lateral Distance (cm)")
-        plt.ylabel("Percent Dose")
+        plt.ylabel("Percent Dose (%)")
         plt.title("Lateral Dose Profile at Depth 4 cm")
         plt.legend()
         plt.grid()
@@ -600,7 +601,6 @@ Note energy must be 1.25 | 10 | 20 type float. Code is not modular for other ene
 # patient.apply_DPB_kernel(energy)
 # patient.plot_dose_map(energy, title=f"{energy} MeV | 2D Dose with Applied DPB Kernel")
 
-
 # ––––––– Deliverable 1: Display each kernel with appropriate scale/cmap –––––––
 patient.plot_DPB_kernal(1.25)
 patient.plot_DPB_kernal(10)
@@ -641,9 +641,9 @@ patient.plot_dose_map(energy=20, title=f"{20} MeV 2D Dose Map | Attenuation in T
 # patient._save(patient.dose_maps[10], "10_MeV_Dose_Map")
 # patient._save(patient.dose_maps[20], "20_MeV_Dose_Map")
 
-patient.dose_maps[1.25] = patient._load("1_25_MeV_Dose_Map") * patient.patient_mask
-patient.dose_maps[10] = patient._load("10_MeV_Dose_Map") * patient.patient_mask
-patient.dose_maps[20] = patient._load("20_MeV_Dose_Map") * patient.patient_mask
+patient.dose_maps[1.25] = patient._load("1_25_MeV_Dose_Map")
+patient.dose_maps[10] = patient._load("10_MeV_Dose_Map")
+patient.dose_maps[20] = patient._load("20_MeV_Dose_Map")
 
 patient.plot_dose_map(
     1.25, title=f"{1.25} MeV | 2D Dose with Applied DPB Kernel", normalize="max"
@@ -660,5 +660,3 @@ patient.plot_PDD()
 
 # ––––––– Deliverable 6:  curves –––––––
 patient.plot_lat_dose_profiles(normalization="central axis")
-
-patient.plot_dose_map()
